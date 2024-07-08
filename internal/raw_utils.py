@@ -46,24 +46,24 @@ def pixels_to_bayer_mask(pix_x, pix_y):
     return np.stack([r, g, b], -1).astype(np.float32)
 
 
-def bilinear_demosaic(bayer):
+def bilinear_demosaic(bayer, cfa_pattern):
     """Converts Bayer data into a full RGB image using bilinear demosaicking.
 
-  Input data should be ndarray of shape [height, width] with 2x2 mosaic pattern:
-    -------------
-    |red  |green|
-    -------------
-    |green|blue |
-    -------------
-  Red and blue channels are bilinearly upsampled 2x, missing green channel
-  elements are the average of the neighboring 4 values in a cross pattern.
+    Input data should be ndarray of shape [height, width] with 2x2 mosaic pattern:
+      -------------
+      |red  |green|
+      -------------
+      |green|blue |
+      -------------
+    Red and blue channels are bilinearly upsampled 2x, missing green channel
+    elements are the average of the neighboring 4 values in a cross pattern.
 
-  Args:
-    bayer: [H, W] array, Bayer mosaic pattern input image.
+    Args:
+      bayer: [H, W] array, Bayer mosaic pattern input image.
 
-  Returns:
-    rgb: [H, W, 3] array, full RGB image.
-  """
+    Returns:
+      rgb: [H, W, 3] array, full RGB image.
+    """
 
     def reshape_quads(*planes):
         """Reshape pixels from four input images to make tiled 2x2 quads."""
@@ -103,8 +103,15 @@ def bilinear_demosaic(bayer):
         # For observed pixels, alt = 0, and for unobserved pixels, alt = avg(cross),
         # so alt + z will have every pixel filled in.
         return alt + z
+    
+       # Extract channels based on the specified CFA pattern
+    if cfa_pattern == '[Red,Green][Green,Blue]':
+        r, g1, g2, b = [bayer[(i // 2)::2, (i % 2)::2] for i in range(4)]
+    elif cfa_pattern == '[Blue,Green][Green,Red]':
+        b, g1, g2, r = [bayer[(i // 2)::2, (i % 2)::2] for i in range(4)]
+    else:
+        raise ValueError(f"Unsupported CFA pattern: {cfa_pattern}")
 
-    r, g1, g2, b = [bayer[(i // 2)::2, (i % 2)::2] for i in range(4)]
     r = bilinear_upsample(r)
     # Flip in x and y before and after calling upsample, as bilinear_upsample
     # assumes that the samples are at the top-left corner of the 2x2 sample.
@@ -166,6 +173,7 @@ _EXIF_KEYS = (
     'AsShotNeutral',  # RGB white balance coefficients.
     'ColorMatrix2',  # XYZ to camera color space conversion matrix.
     'NoiseProfile',  # Shot and read noise levels.
+    'CFAPattern',  # Bayer CFA pattern.
 )
 
 # Color conversion from reference illuminant XYZ to RGB color space.
@@ -201,6 +209,10 @@ def process_exif(exifs):
         exif_value = exif.get(key)
         if exif_value is None:
             continue
+        if key == 'CFAPattern':
+            # this is a string like: "[Blue,Green][Green,Red]"
+            meta[key] = exif_value
+            continue
         # Values can be a single int or float...
         if isinstance(exif_value, int) or isinstance(exif_value, float):
             vals = [x[key] for x in exifs]
@@ -208,6 +220,7 @@ def process_exif(exifs):
         elif isinstance(exif_value, str):
             vals = [[float(z) for z in x[key].split(' ')] for x in exifs]
         meta[key] = np.squeeze(np.array(vals))
+        
     # Shutter speed is a special case, a string written like 1/N.
     meta['ShutterSpeed'] = np.fromiter(
         (1. / float(exif['ShutterSpeed'].split('/')[1]) for exif in exifs), float)
@@ -273,7 +286,7 @@ def load_raw_dataset(split, data_dir, image_names, exposure_percentile, n_downsa
             # Discard the first COLMAP image name as it is a copy of the test image.
             image_names = image_names[1:]
 
-    raws, exifs = load_raw_images(image_dir, image_names)
+    raws, exifs = load_raw_images(image_dir, image_names) # raws = [B, H, W]
     meta = process_exif(exifs)
 
     if testscene and split == utils.DataSplit.TEST:
@@ -294,7 +307,7 @@ def load_raw_dataset(split, data_dir, image_names, exposure_percentile, n_downsa
         shutter_ratio = 1.
 
     # Next we determine an index for each unique shutter speed in the data.
-    shutter_speeds = meta['ShutterSpeed']
+    shutter_speeds = meta['ShutterSpeed'] # [B]
     # Sort the shutter speeds from slowest (largest) to fastest (smallest).
     # This way index 0 will always correspond to the brightest image.
     unique_shutters = np.sort(np.unique(shutter_speeds))[::-1]
@@ -302,15 +315,15 @@ def load_raw_dataset(split, data_dir, image_names, exposure_percentile, n_downsa
     for i, shutter in enumerate(unique_shutters):
         # Assign index `i` to all images with shutter speed `shutter`.
         exposure_idx[shutter_speeds == shutter] = i
-    meta['exposure_idx'] = exposure_idx
-    meta['unique_shutters'] = unique_shutters
+    meta['exposure_idx'] = exposure_idx # [B]
+    meta['unique_shutters'] = unique_shutters # [U]
     # Rescale to use relative shutter speeds, where 1. is the brightest.
     # This way the NeRF output with exposure=1 will always be reasonable.
-    meta['exposure_values'] = shutter_speeds / unique_shutters[0]
+    meta['exposure_values'] = shutter_speeds / unique_shutters[0] # [B]
 
     # Rescale raw sensor measurements to [0, 1] (plus noise).
-    blacklevel = meta['BlackLevel'].reshape(-1, 1, 1)
-    whitelevel = meta['WhiteLevel'].reshape(-1, 1, 1)
+    blacklevel = meta['BlackLevel'].reshape(-1, 1, 1) # [B * 4, 1, 1]
+    whitelevel = meta['WhiteLevel'].reshape(-1, 1, 1) # [B, 1, 1]
     images = (raws - blacklevel) / (whitelevel - blacklevel) * shutter_ratio
 
     # Calculate value for exposure level when gamma mapping, defaults to 97%.
