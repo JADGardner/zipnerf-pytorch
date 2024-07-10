@@ -35,25 +35,43 @@ def postprocess_raw(raw, camtorgb, exposure=None):
     return srgb
 
 
-def pixels_to_bayer_mask(pix_x, pix_y):
+def pixels_to_bayer_mask(pix_x, pix_y, cfa_pattern):
     """Computes binary RGB Bayer mask values from integer pixel coordinates."""
-    # Red is top left (0, 0).
-    r = (pix_x % 2 == 0) * (pix_y % 2 == 0)
-    # Green is top right (0, 1) and bottom left (1, 0).
-    g = (pix_x % 2 == 1) * (pix_y % 2 == 0) + (pix_x % 2 == 0) * (pix_y % 2 == 1)
-    # Blue is bottom right (1, 1).
-    b = (pix_x % 2 == 1) * (pix_y % 2 == 1)
+    
+    if cfa_pattern == '[Red,Green][Green,Blue]':
+        # Red is top left (0, 0).
+        r = (pix_x % 2 == 0) * (pix_y % 2 == 0)
+        # Green is top right (0, 1) and bottom left (1, 0).
+        g = (pix_x % 2 == 1) * (pix_y % 2 == 0) + (pix_x % 2 == 0) * (pix_y % 2 == 1)
+        # Blue is bottom right (1, 1).
+        b = (pix_x % 2 == 1) * (pix_y % 2 == 1)
+
+    elif cfa_pattern == '[Blue,Green][Green,Red]':
+        # Blue is top left (0, 0).
+        b = (pix_x % 2 == 0) * (pix_y % 2 == 0)
+        # Green is top right (0, 1) and bottom left (1, 0).
+        g = (pix_x % 2 == 1) * (pix_y % 2 == 0) + (pix_x % 2 == 0) * (pix_y % 2 == 1)
+        # Red is bottom right (1, 1).
+        r = (pix_x % 2 == 1) * (pix_y % 2 == 1)
+
     return np.stack([r, g, b], -1).astype(np.float32)
 
 
 def bilinear_demosaic(bayer, cfa_pattern):
     """Converts Bayer data into a full RGB image using bilinear demosaicking.
 
-    Input data should be ndarray of shape [height, width] with 2x2 mosaic pattern:
+    Input data should be ndarray of shape [height, width] with 2x2 mosaic pattern,
+    either RGGB or BGGR:
       -------------
       |red  |green|
       -------------
       |green|blue |
+      -------------
+    or
+      -------------
+      |blue |green|
+      -------------
+      |green|red  |
       -------------
     Red and blue channels are bilinearly upsampled 2x, missing green channel
     elements are the average of the neighboring 4 values in a cross pattern.
